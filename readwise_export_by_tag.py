@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """
-Readwise 按标签导出文章 Public 链接
+Readwise Reader 按标签导出 Reader 链接
 ====================================
-功能：通过 Readwise API v2 的 /export/ 端点，
-      获取指定标签下所有文章的 readwise_url 和 source_url，
-      输出为 CSV 文件。
+功能：通过 Readwise Reader API v3 的 /list/ 端点，
+      获取指定标签下所有文档的 Reader 链接（read.readwise.io/read/{id}）
+      和原始 source_url，输出为 CSV 文件。
+
+Reader 链接是给下游 Readwise MCP 读取全文用的，本脚本不抓原文。
 
 使用方法：
   1. 在脚本同目录下的 .env 文件中写入 READWISE_TOKEN=xxx（推荐）
@@ -23,7 +25,8 @@ import time
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError
 
-API_BASE = "https://readwise.io/api/v2"
+API_BASE = "https://readwise.io/api/v3"
+READER_URL_PREFIX = "https://read.readwise.io/read/"
 SCRIPT_DIR = Path(__file__).resolve().parent
 
 
@@ -43,10 +46,12 @@ def load_dotenv():
             os.environ[key] = value
 
 
-def fetch_all_books(token: str) -> list:
+def fetch_all_documents(token: str) -> list:
     """
-    通过 /export/ 端点分页获取所有书籍及其高亮。
-    返回 results 列表，每个元素是一本书/文章的完整数据。
+    通过 Reader v3 /list/ 端点分页获取所有文档（不含 html 正文）。
+    返回 results 列表，每个元素是一篇 Reader 文档的元数据。
+
+    /list/ 不带 withHtmlContent 时限速 20 req/min；正文由下游 MCP 取。
     """
     all_results = []
     next_cursor = None
@@ -54,7 +59,7 @@ def fetch_all_books(token: str) -> list:
 
     while True:
         page += 1
-        url = f"{API_BASE}/export/"
+        url = f"{API_BASE}/list/"
         if next_cursor:
             url += f"?pageCursor={next_cursor}"
 
@@ -84,42 +89,30 @@ def fetch_all_books(token: str) -> list:
         if not next_cursor:
             break
 
-        # 尊重速率限制
-        time.sleep(1)
+        # Reader /list/ 限速 20 req/min
+        time.sleep(3)
 
     return all_results
 
 
-def filter_by_tag(books: list, tag_name: str) -> list:
+def filter_by_tag(docs: list, tag_name: str) -> list:
     """
-    筛选出包含指定标签的文章。
-    同时检查 book_tags（书籍/文档级别标签）和 highlights 中的 tags（高亮级别标签）。
+    筛选出包含指定标签的 Reader 文档。
+    Reader /list/ 的 tags 是 dict：{"tag_name": {"name": ..., ...}, ...}。
     """
     matched = []
     tag_lower = tag_name.lower().strip()
 
-    for book in books:
-        # 检查 book_tags
-        book_tags = book.get("book_tags", [])
-        book_tag_names = [t.get("name", "").lower().strip() for t in book_tags]
-
-        if tag_lower in book_tag_names:
-            matched.append(book)
-            continue
-
-        # 检查 highlights 中的 tags
-        highlights = book.get("highlights", [])
-        for hl in highlights:
-            hl_tags = hl.get("tags", [])
-            hl_tag_names = [t.get("name", "").lower().strip() for t in hl_tags]
-            if tag_lower in hl_tag_names:
-                matched.append(book)
-                break
+    for doc in docs:
+        tags_dict = doc.get("tags") or {}
+        tag_names = [str(k).lower().strip() for k in tags_dict.keys()]
+        if tag_lower in tag_names:
+            matched.append(doc)
 
     return matched
 
 
-def export_to_csv(books: list, output_file: str, tag_name: str):
+def export_to_csv(docs: list, output_file: str, tag_name: str):
     """将筛选结果导出为 CSV 文件。"""
     with open(output_file, "w", newline="", encoding="utf-8-sig") as f:
         writer = csv.writer(f)
@@ -127,48 +120,44 @@ def export_to_csv(books: list, output_file: str, tag_name: str):
             "标题 (Title)",
             "作者 (Author)",
             "分类 (Category)",
-            "Readwise URL",
+            "Reader URL",
             "原始链接 (Source URL)",
-            "高亮数量",
-            "书籍标签 (Book Tags)",
+            "标签 (Tags)",
         ])
 
-        for book in books:
-            title = book.get("title", "")
-            author = book.get("author", "")
-            category = book.get("category", "")
-            readwise_url = book.get("readwise_url", "")
-            source_url = book.get("source_url", "")
-            num_highlights = len(book.get("highlights", []))
-            book_tags = ", ".join(
-                t.get("name", "") for t in book.get("book_tags", [])
-            )
+        for doc in docs:
+            title = doc.get("title", "")
+            author = doc.get("author", "")
+            category = doc.get("category", "")
+            reader_url = f"{READER_URL_PREFIX}{doc['id']}" if doc.get("id") else ""
+            source_url = doc.get("source_url", "")
+            tags_dict = doc.get("tags") or {}
+            tags_str = ", ".join(str(k) for k in tags_dict.keys())
 
             writer.writerow([
                 title,
                 author,
                 category,
-                readwise_url,
+                reader_url,
                 source_url,
-                num_highlights,
-                book_tags,
+                tags_str,
             ])
 
     print(f"\n✅ 已导出到: {output_file}")
 
 
-def print_summary(books: list, tag_name: str):
+def print_summary(docs: list, tag_name: str):
     """在终端打印简要摘要。"""
     print(f"\n{'='*60}")
-    print(f"标签 [{tag_name}] 下共找到 {len(books)} 篇文章")
+    print(f"标签 [{tag_name}] 下共找到 {len(docs)} 篇文章")
     print(f"{'='*60}")
 
-    for i, book in enumerate(books, 1):
-        title = book.get("title", "(无标题)")
-        readwise_url = book.get("readwise_url", "N/A")
-        source_url = book.get("source_url", "N/A")
+    for i, doc in enumerate(docs, 1):
+        title = doc.get("title", "(无标题)")
+        reader_url = f"{READER_URL_PREFIX}{doc['id']}" if doc.get("id") else "N/A"
+        source_url = doc.get("source_url", "")
         print(f"\n{i}. {title}")
-        print(f"   Readwise: {readwise_url}")
+        print(f"   Reader: {reader_url}")
         if source_url:
             print(f"   原始链接: {source_url}")
 
@@ -177,7 +166,7 @@ def main():
     load_dotenv()
 
     parser = argparse.ArgumentParser(
-        description="Readwise 按标签导出文章 Public 链接"
+        description="Readwise Reader 按标签导出 Reader 链接"
     )
     parser.add_argument(
         "--token", default=os.environ.get("READWISE_TOKEN"),
@@ -207,28 +196,26 @@ def main():
     if not args.list_tags and not args.tag:
         parser.error("必须指定 --tag 或使用 --list-tags")
 
-    print("🔄 正在从 Readwise API 获取数据...\n")
-    books = fetch_all_books(args.token)
-    print(f"\n📚 共获取 {len(books)} 本书/文章")
+    print("🔄 正在从 Readwise Reader API 获取数据...\n")
+    docs = fetch_all_documents(args.token)
+    print(f"\n📚 共获取 {len(docs)} 篇文档")
 
     # 如果用户只想看标签列表
     if args.list_tags:
         all_tags = set()
-        for book in books:
-            for t in book.get("book_tags", []):
-                all_tags.add(t.get("name", ""))
-            for hl in book.get("highlights", []):
-                for t in hl.get("tags", []):
-                    all_tags.add(t.get("name", ""))
+        for doc in docs:
+            tags_dict = doc.get("tags") or {}
+            for k in tags_dict.keys():
+                if k:
+                    all_tags.add(str(k))
         print(f"\n🏷️  共找到 {len(all_tags)} 个标签:")
         for tag in sorted(all_tags):
-            if tag:
-                print(f"   - {tag}")
+            print(f"   - {tag}")
         return
 
     # 按标签过滤
     print(f"\n🔍 正在筛选标签 [{args.tag}]...")
-    matched = filter_by_tag(books, args.tag)
+    matched = filter_by_tag(docs, args.tag)
 
     if not matched:
         print(f"\n⚠️  未找到标签 [{args.tag}] 下的文章。")
