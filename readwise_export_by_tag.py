@@ -29,6 +29,9 @@ API_BASE = "https://readwise.io/api/v3"
 READER_URL_PREFIX = "https://read.readwise.io/read/"
 SCRIPT_DIR = Path(__file__).resolve().parent
 
+# 手动打标签的文章只会出现在这 4 个位置，跳过 feed 可避免拉取上万条 RSS 自动抓取内容
+NON_FEED_LOCATIONS = ["new", "later", "shortlist", "archive"]
+
 
 def load_dotenv():
     """从脚本同目录的 .env 文件加载环境变量（不覆盖已有值）。"""
@@ -49,48 +52,54 @@ def load_dotenv():
 def fetch_all_documents(token: str) -> list:
     """
     通过 Reader v3 /list/ 端点分页获取所有文档（不含 html 正文）。
-    返回 results 列表，每个元素是一篇 Reader 文档的元数据。
+    仅遍历 NON_FEED_LOCATIONS，跳过 feed 以避免 RSS 自动抓取内容拖慢速度。
 
     /list/ 不带 withHtmlContent 时限速 20 req/min；正文由下游 MCP 取。
     """
     all_results = []
-    next_cursor = None
-    page = 0
 
-    while True:
-        page += 1
-        url = f"{API_BASE}/list/"
-        if next_cursor:
-            url += f"?pageCursor={next_cursor}"
+    for location in NON_FEED_LOCATIONS:
+        print(f"\n📂 位置 [{location}]")
+        next_cursor = None
+        page = 0
+        loc_count = 0
 
-        req = Request(url)
-        req.add_header("Authorization", f"Token {token}")
+        while True:
+            page += 1
+            params = f"location={location}"
+            if next_cursor:
+                params += f"&pageCursor={next_cursor}"
+            url = f"{API_BASE}/list/?{params}"
 
-        print(f"  正在获取第 {page} 页数据...")
+            req = Request(url)
+            req.add_header("Authorization", f"Token {token}")
 
-        try:
-            with urlopen(req) as resp:
-                data = json.loads(resp.read().decode("utf-8"))
-        except HTTPError as e:
-            if e.code == 429:
-                retry_after = int(e.headers.get("Retry-After", 60))
-                print(f"  ⚠️  触发限流，等待 {retry_after} 秒后重试...")
-                time.sleep(retry_after)
-                continue
-            else:
-                print(f"  ❌ API 请求失败: HTTP {e.code}")
-                sys.exit(1)
+            print(f"  正在获取第 {page} 页...")
 
-        results = data.get("results", [])
-        all_results.extend(results)
-        print(f"  本页获取 {len(results)} 条，累计 {len(all_results)} 条")
+            try:
+                with urlopen(req) as resp:
+                    data = json.loads(resp.read().decode("utf-8"))
+            except HTTPError as e:
+                if e.code == 429:
+                    retry_after = int(e.headers.get("Retry-After", 60))
+                    print(f"  ⚠️  触发限流，等待 {retry_after} 秒后重试...")
+                    time.sleep(retry_after)
+                    continue
+                else:
+                    print(f"  ❌ API 请求失败: HTTP {e.code}")
+                    sys.exit(1)
 
-        next_cursor = data.get("nextPageCursor")
-        if not next_cursor:
-            break
+            results = data.get("results", [])
+            all_results.extend(results)
+            loc_count += len(results)
+            print(f"  本页 {len(results)} 条，位置累计 {loc_count} 条（总累计 {len(all_results)}）")
 
-        # Reader /list/ 限速 20 req/min
-        time.sleep(3)
+            next_cursor = data.get("nextPageCursor")
+            if not next_cursor:
+                break
+
+            # Reader /list/ 限速 20 req/min
+            time.sleep(3)
 
     return all_results
 
