@@ -27,6 +27,15 @@ python3 readwise_export_by_tag.py --tag 标签名
 
 # 指定输出文件名
 python3 readwise_export_by_tag.py --tag 标签名 --output my_export.csv
+
+# 先列出 Inbox 最近 20 条（不导出）
+python3 readwise_export_by_tag.py --recent 20 --list-only
+
+# 确认无误后，导出到默认文件名 readwise_inbox_recent_20.csv
+python3 readwise_export_by_tag.py --recent 20
+
+# 或指定自己的文件名
+python3 readwise_export_by_tag.py --recent 20 --output my_recent.csv
 ```
 
 ## 参数说明

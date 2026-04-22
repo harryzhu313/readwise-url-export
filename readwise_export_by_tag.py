@@ -104,6 +104,56 @@ def fetch_all_documents(token: str) -> list:
     return all_results
 
 
+def fetch_inbox_recent(token: str, limit: int) -> list:
+    """
+    仅抓取 location=new (Inbox)，按 created_at 倒序取前 limit 条。
+    Reader API 未暴露排序参数，所以整页拉完再本地排序。
+    """
+    all_results = []
+    next_cursor = None
+    page = 0
+
+    print(f"📂 位置 [new / Inbox]，将按 created_at 倒序取前 {limit} 条")
+
+    while True:
+        page += 1
+        params = "location=new"
+        if next_cursor:
+            params += f"&pageCursor={next_cursor}"
+        url = f"{API_BASE}/list/?{params}"
+
+        req = Request(url)
+        req.add_header("Authorization", f"Token {token}")
+
+        print(f"  正在获取第 {page} 页...")
+
+        try:
+            with urlopen(req) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+        except HTTPError as e:
+            if e.code == 429:
+                retry_after = int(e.headers.get("Retry-After", 60))
+                print(f"  ⚠️  触发限流，等待 {retry_after} 秒后重试...")
+                time.sleep(retry_after)
+                continue
+            else:
+                print(f"  ❌ API 请求失败: HTTP {e.code}")
+                sys.exit(1)
+
+        results = data.get("results", [])
+        all_results.extend(results)
+        print(f"  本页 {len(results)} 条，累计 {len(all_results)} 条")
+
+        next_cursor = data.get("nextPageCursor")
+        if not next_cursor:
+            break
+
+        time.sleep(3)
+
+    all_results.sort(key=lambda d: d.get("created_at") or "", reverse=True)
+    return all_results[:limit]
+
+
 def filter_by_tag(docs: list, tag_name: str) -> list:
     """
     筛选出包含指定标签的 Reader 文档。
@@ -193,6 +243,14 @@ def main():
         "--list-tags", action="store_true",
         help="列出所有可用的标签（不导出）"
     )
+    parser.add_argument(
+        "--recent", type=int, default=None,
+        help="只抓 Inbox，按添加时间倒序取前 N 条（忽略 --tag）"
+    )
+    parser.add_argument(
+        "--list-only", action="store_true",
+        help="仅在终端列出结果，不导出 CSV"
+    )
 
     args = parser.parse_args()
 
@@ -202,8 +260,18 @@ def main():
             "或通过 --token 参数传入"
         )
 
-    if not args.list_tags and not args.tag:
-        parser.error("必须指定 --tag 或使用 --list-tags")
+    if not args.list_tags and not args.tag and not args.recent:
+        parser.error("必须指定 --tag、--recent 或 --list-tags")
+
+    # --recent 模式：只抓 Inbox，不遍历全部位置
+    if args.recent:
+        print(f"🔄 正在抓取 Inbox 最近 {args.recent} 条...\n")
+        docs = fetch_inbox_recent(args.token, args.recent)
+        print_summary(docs, f"Inbox 最近 {args.recent} 条")
+        if not args.list_only:
+            output_file = args.output or f"readwise_inbox_recent_{args.recent}.csv"
+            export_to_csv(docs, output_file, "recent")
+        return
 
     print("🔄 正在从 Readwise Reader API 获取数据...\n")
     docs = fetch_all_documents(args.token)
@@ -234,7 +302,9 @@ def main():
     # 打印摘要
     print_summary(matched, args.tag)
 
-    # 导出 CSV
+    # 导出 CSV（除非指定 --list-only）
+    if args.list_only:
+        return
     output_file = args.output or f"readwise_{args.tag}.csv"
     export_to_csv(matched, output_file, args.tag)
 
